@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>My Rhythm</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 3px; }
+</style>
+</head>
+<body class="bg-slate-50">
+
+<!-- ============ 설정: 여기에 본인의 Google OAuth Client ID를 넣으세요 ============ -->
+<script>
+  const CONFIG = {
+    // Google Cloud Console에서 발급받은 OAuth 2.0 클라이언트 ID (웹 애플리케이션)
+    CLIENT_ID: "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+  };
+</script>
+<!-- ================================================================= -->
+
+<div id="header"></div>
+<div class="flex flex-col md:flex-row min-h-screen">
+  <div id="sidebar"></div>
+  <div id="main" class="flex-1"></div>
+</div>
+<div id="focus-overlay" class="hidden fixed inset-0 bg-black/95 z-50 flex-col items-center justify-center text-white p-6"></div>
+
+<script>
+/* =========================================================
+   상태 (State)
+   ========================================================= */
+const YEAR = 2026, MONTH = 7, DAYS_IN_MONTH = 31, TODAY_DAY = 26;
+
+let state = {
+  accessToken: null,
+  channel: null,               // { title, thumbnail }
+  playlists: [],                // [{ id, title, thumbnail, itemCount }]
+  playlistItems: {},            // playlistId -> [{ videoId, title, thumbnail }]
+  openPlaylistId: null,         // 항목을 펼쳐서 보고 있는 재생목록
+  focusPlaylistId: null,        // Focus Mode에서 재생할 재생목록
+  selectedDate: TODAY_DAY,
+  songArchive: {
+    26: { videoId: "dQw4w9WgXcQ", title: "오늘 기록된 노래", recordedAt: "오늘 기록됨" },
+  },
+  ddays: [
+    { id: 1, label: "단독 콘서트", date: "2026-09-12" },
+    { id: 2, label: "2학기 중간고사", date: "2026-10-20" },
+  ],
+  activeTab: "planner",         // planner | archive
+};
+
+let tokenClient = null;
+let timer = { durationMin: 25, secondsLeft: 25 * 60, running: false, intervalId: null };
+
+/* =========================================================
+   Google 로그인 (OAuth 2.0 / Google Identity Services)
+   ========================================================= */
+function initGoogleAuth() {
+  if (!window.google || CONFIG.CLIENT_ID.startsWith("YOUR_")) return;
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CONFIG.CLIENT_ID,
+    scope: "https://www.googleapis.com/auth/youtube.readonly",
+    callback: async (tokenResponse) => {
+      state.accessToken = tokenResponse.access_token;
+      await fetchChannel();
+      await fetchPlaylists();
+      renderApp();
+    },
+  });
+}
+window.addEventListener("load", () => setTimeout(initGoogleAuth, 300));
+
+function login() {
+  if (CONFIG.CLIENT_ID.startsWith("YOUR_")) {
+    alert("먼저 SETUP.md 안내에 따라 index.html의 CONFIG.CLIENT_ID를 본인의 구글 OAuth 클라이언트 ID로 바꿔주세요.");
+    return;
+  }
+  if (!tokenClient) { initGoogleAuth(); }
+  tokenClient?.requestAccessToken();
+}
+
+function logout() {
+  if (state.accessToken) {
+    google.accounts.oauth2.revoke(state.accessToken, () => {});
+  }
+  state = { ...state, accessToken: null, channel: null, playlists: [], playlistItems: {}, focusPlaylistId: null };
+  renderApp();
+}
+
+/* =========================================================
+   YouTube Data API v3 호출
+   ========================================================= */
+async function ytFetch(path) {
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}`, {
+    headers: { Authorization: `Bearer ${state.accessToken}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || "YouTube API 요청 실패");
+  }
+  return res.json();
+}
+
+async function fetchChannel() {
+  try {
+    const data = await ytFetch("channels?part=snippet&mine=true");
+    const ch = data.items?.[0];
+    if (ch) {
+      state.channel = {
+        title: ch.snippet.title,
+        thumbnail: ch.snippet.thumbnails?.default?.url,
+      };
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function fetchPlaylists() {
+  try {
+    const data = await ytFetch("playlists?part=snippet,contentDetails&mine=true&maxResults=50");
+    state.playlists = (data.items || []).map((item) => ({
+      id: item.id,
+      title: item.snippet.title,
+      thumbnail: item.snippet.thumbnails?.medium?.url || item.snippet.thumbnails?.default?.url || "",
+      itemCount: item.contentDetails.itemCount,
+    }));
+  } catch (e) {
+    alert("재생목록을 불러오지 못했어요: " + e.message);
+  }
+}
+
+async function fetchPlaylistItems(playlistId) {
+  if (state.playlistItems[playlistId]) return state.playlistItems[playlistId];
+  try {
+    const data = await ytFetch(`playlistItems?part=snippet&maxResults=25&playlistId=${playlistId}`);
+    const items = (data.items || []).map((item) => ({
+      videoId: item.snippet.resourceId?.videoId,
+      title: item.snippet.title,
+      thumbnail: item.snippet.thumbnails?.default?.url || "",
+    })).filter((i) => i.videoId);
+    state.playlistItems[playlistId] = items;
+    return items;
+  } catch (e) {
+    alert("재생목록 곡을 불러오지 못했어요: " + e.message);
+    return [];
+  }
+}
+
+/* =========================================================
+   유틸
+   ========================================================= */
+function extractVideoId(input) {
+  if (!input) return null;
+  const t = input.trim();
+  if (t.includes("watch?v=")) return t.split("v=")[1].split("&")[0];
+  if (t.includes("youtu.be/")) return t.split("youtu.be/")[1].split("?")[0];
+  if (t.includes("embed/")) return t.split("embed/")[1].split("?")[0];
+  if (/^[a-zA-Z0-9_-]{11}$/.test(t)) return t;
+  return null;
+}
+function formatMMSS(s) {
+  const m = Math.floor(s / 60).toString().padStart(2, "0");
+  const ss = Math.floor(s % 60).toString().padStart(2, "0");
+  return `${m}:${ss}`;
+}
+function getDdayCount(dateStr) {
+  const today = new Date(2026, 6, 26); today.setHours(0,0,0,0);
+  const target = new Date(dateStr); target.setHours(0,0,0,0);
+  return Math.round((target - today) / 86400000);
+}
+function escapeHtml(str = "") {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/* =========================================================
+   액션 (버튼 핸들러)
+   ========================================================= */
+function selectDate(day) { state.selectedDate = day; renderApp(); }
+function setTab(tab) { state.activeTab = tab; renderApp(); }
+
+function saveManualSong() {
+  const input = document.getElementById("manual-song-input");
+  const id = extractVideoId(input.value);
+  if (!id) { alert("유효한 유튜브 링크를 입력해주세요."); return; }
+  state.songArchive[state.selectedDate] = {
+    videoId: id, title: "직접 등록한 노래",
+    recordedAt: `${MONTH}월 ${state.selectedDate}일에 기록됨`,
+  };
+  input.value = "";
+  renderApp();
+}
+
+async function togglePlaylistOpen(playlistId) {
+  state.openPlaylistId = state.openPlaylistId === playlistId ? null : playlistId;
+  renderApp();
+  if (state.openPlaylistId) await fetchPlaylistItems(playlistId).then(renderApp);
+}
+
+function archiveFromPlaylist(videoId, title) {
+  state.songArchive[state.selectedDate] = {
+    videoId, title, recordedAt: `${MONTH}월 ${state.selectedDate}일에 기록됨`,
+  };
+  renderApp();
+}
+
+function setFocusPlaylist(playlistId) {
+  state.focusPlaylistId = state.focusPlaylistId === playlistId ? null : playlistId;
+  renderApp();
+}
+
+function addDday() {
+  const label = document.getElementById("dday-label").value.trim();
+  const date = document.getElementById("dday-date").value;
+  if (!label || !date) return;
+  state.ddays.push({ id: Date.now(), label, date });
+  state.ddays.sort((a, b) => new Date(a.date) - new Date(b.date));
+  document.getElementById("dday-label").value = "";
+  document.getElementById("dday-date").value = "";
+  renderApp();
+}
+function removeDday(id) {
+  state.ddays = state.ddays.filter((d) => d.id !== id);
+  renderApp();
+}
+
+/* =========================================================
+   Focus Mode (오버레이는 별도로 관리 — 타이머가 iframe을 재생성하지 않도록)
+   ========================================================= */
+function focusEmbedSrc() {
+  if (state.focusPlaylistId) {
+    return `https://www.youtube.com/embed/videoseries?list=${state.focusPlaylistId}&autoplay=1`;
+  }
+  const song = state.songArchive[state.selectedDate] || state.songArchive[TODAY_DAY];
+  if (song) return `https://www.youtube.com/embed/${song.videoId}?autoplay=1`;
+  return null;
+}
+
+function openFocusMode() {
+  timer.secondsLeft = timer.durationMin * 60;
+  timer.running = true;
+  renderFocusOverlay();
+  document.getElementById("focus-overlay").classList.remove("hidden");
+  document.getElementById("focus-overlay").classList.add("flex");
+  startTimerLoop();
+}
+function closeFocusMode() {
+  timer.running = false;
+  clearInterval(timer.intervalId);
+  document.getElementById("focus-overlay").classList.add("hidden");
+  document.getElementById("focus-overlay").classList.remove("flex");
+}
+function setFocusDuration(min) {
+  timer.durationMin = min;
+  timer.secondsLeft = min * 60;
+  timer.running = false;
+  clearInterval(timer.intervalId);
+  renderFocusOverlay();
+}
+function toggleTimer() {
+  timer.running = !timer.running;
+  if (timer.running) startTimerLoop(); else clearInterval(timer.intervalId);
+  renderFocusOverlay();
+}
+function resetTimer() {
+  timer.running = false;
+  clearInterval(timer.intervalId);
+  timer.secondsLeft = timer.durationMin * 60;
+  renderFocusOverlay();
+}
+function startTimerLoop() {
+  clearInterval(timer.intervalId);
+  timer.intervalId = setInterval(() => {
+    if (!timer.running) return;
+    timer.secondsLeft = Math.max(0, timer.secondsLeft - 1);
+    const el = document.getElementById("focus-timer-display");
+    if (el) el.textContent = formatMMSS(timer.secondsLeft);
+    if (timer.secondsLeft === 0) { timer.running = false; clearInterval(timer.intervalId); renderFocusOverlay(); }
+  }, 1000);
+}
+function selectFocusPlaylistInOverlay(id) {
+  state.focusPlaylistId = id || null;
+  renderFocusOverlay();
+}
+
+function renderFocusOverlay() {
+  const src = focusEmbedSrc();
+  const playlistOptions = state.playlists.map(
+    (p) => `<option value="${p.id}" ${state.focusPlaylistId === p.id ? "selected" : ""}>${escapeHtml(p.title)}</option>`
+  ).join("");
+
+  document.getElementById("focus-overlay").innerHTML = `
+    <button onclick="closeFocusMode()" class="absolute top-6 right-6 text-gray-400 hover:text-white transition">
+      <i data-lucide="x" class="w-7 h-7"></i>
+    </button>
+    <p class="text-xs uppercase tracking-widest text-indigo-400 mb-2">Focus Mode</p>
+    <h2 id="focus-timer-display" class="text-7xl font-mono font-bold mb-6">${formatMMSS(timer.secondsLeft)}</h2>
+
+    ${state.playlists.length > 0 ? `
+      <select onchange="selectFocusPlaylistInOverlay(this.value)" class="mb-4 text-sm bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-white">
+        <option value="">노래 하나만 재생 (${state.selectedDate}일 기록)</option>
+        ${playlistOptions}
+      </select>` : `<p class="text-xs text-gray-500 mb-4">로그인하면 내 재생목록으로 재생할 수 있어요</p>`}
+
+    ${src ? `
+      <iframe class="w-full max-w-md rounded-xl aspect-video mb-6 opacity-90" src="${src}"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"></iframe>`
+      : `<p class="text-sm text-gray-500 mb-6">재생할 노래나 재생목록이 없어요</p>`}
+
+    <div class="flex items-center gap-3 mb-8">
+      ${[25, 45, 60].map((m) => `
+        <button onclick="setFocusDuration(${m})" class="px-4 py-2 rounded-full text-sm transition ${timer.durationMin === m ? "bg-indigo-600" : "bg-slate-800 hover:bg-slate-700"}">${m}분</button>
+      `).join("")}
+    </div>
+
+    <div class="flex items-center gap-4">
+      <button onclick="toggleTimer()" class="flex items-center gap-2 px-6 py-3 rounded-full bg-indigo-600 hover:bg-indigo-500 transition font-medium">
+        <i data-lucide="${timer.running ? "pause" : "play"}" class="w-4 h-4"></i> ${timer.running ? "일시정지" : "시작"}
+      </button>
+      <button onclick="resetTimer()" class="px-6 py-3 rounded-full bg-slate-800 hover:bg-slate-700 transition font-medium">초기화</button>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+/* =========================================================
+   렌더링
+   ========================================================= */
+function renderApp() {
+  renderHeader();
+  renderSidebar();
+  renderMain();
+  if (window.lucide) lucide.createIcons();
+}
+
+function renderHeader() {
+  document.getElementById("header").innerHTML = `
+    <div class="hidden"></div>
+  `;
+}
+
+function renderSidebar() {
+  const loggedIn = !!state.accessToken;
+
+  const playlistListHtml = state.playlists.map((p) => `
+    <div class="border border-gray-100 rounded-xl overflow-hidden">
+      <button onclick="togglePlaylistOpen('${p.id}')" class="w-full flex items-center gap-2 p-2 text-left hover:bg-gray-50">
+        <img src="${p.thumbnail}" class="w-10 h-10 rounded object-cover shrink-0" />
+        <span class="flex-1 min-w-0">
+          <span class="block text-xs font-medium text-gray-700 truncate">${escapeHtml(p.title)}</span>
+          <span class="block text-[10px] text-gray-400">${p.itemCount}곡</span>
+        </span>
+        <button onclick="event.stopPropagation(); setFocusPlaylist('${p.id}')"
+          class="text-[10px] px-2 py-1 rounded-full shrink-0 ${state.focusPlaylistId === p.id ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}">
+          Focus용
+        </button>
+      </button>
+      ${state.openPlaylistId === p.id ? `
+        <div class="max-h-40 overflow-y-auto border-t border-gray-100">
+          ${(state.playlistItems[p.id] || []).map((v) => `
+            <button onclick="archiveFromPlaylist('${v.videoId}', '${escapeHtml(v.title).replace(/'/g, "\\'")}')"
+              class="w-full flex items-center gap-2 p-2 text-left hover:bg-indigo-50 text-xs text-gray-600">
+              <img src="${v.thumbnail}" class="w-8 h-8 rounded object-cover shrink-0" />
+              <span class="truncate">${escapeHtml(v.title)}</span>
+            </button>
+          `).join("") || `<p class="text-[10px] text-gray-400 p-2">불러오는 중...</p>`}
+        </div>
+      ` : ""}
+    </div>
+  `).join("");
+
+  document.getElementById("sidebar").innerHTML = `
+    <aside class="w-full md:w-80 bg-white border-r p-6 flex flex-col gap-6">
+      <div>
+        <h1 class="text-2xl font-bold text-indigo-600 mb-1">My Rhythm</h1>
+        <p class="text-sm text-gray-500">음악과 일상의 기록</p>
+      </div>
+
+      <!-- 구글 로그인 -->
+      <div class="bg-white border border-gray-100 rounded-2xl p-4">
+        ${loggedIn ? `
+          <div class="flex items-center gap-3 mb-3">
+            <img src="${state.channel?.thumbnail || ""}" class="w-9 h-9 rounded-full" />
+            <div class="min-w-0">
+              <p class="text-sm font-bold text-gray-800 truncate">${escapeHtml(state.channel?.title || "내 계정")}</p>
+              <p class="text-[10px] text-gray-400">YouTube 계정 연결됨</p>
+            </div>
+          </div>
+          <button onclick="logout()" class="w-full text-xs border border-gray-200 rounded-lg py-1.5 text-gray-500 hover:bg-gray-50">로그아웃</button>
+        ` : `
+          <button onclick="login()" class="w-full flex items-center justify-center gap-2 text-sm font-medium border border-gray-200 rounded-lg py-2 hover:bg-gray-50">
+            <i data-lucide="log-in" class="w-4 h-4"></i> 구글 계정으로 로그인
+          </button>
+          <p class="text-[10px] text-gray-400 mt-2">로그인하면 내 유튜브 재생목록을 그대로 불러와요.</p>
+        `}
+      </div>
+
+      <!-- 오늘의 노래 -->
+      <div class="bg-slate-900 rounded-2xl p-4 text-white">
+        <div class="flex items-center gap-2 mb-3">
+          <i data-lucide="music" class="w-4 h-4 text-indigo-400"></i>
+          <span class="text-xs font-medium uppercase tracking-wider">${state.selectedDate}일의 노래</span>
+        </div>
+        ${state.songArchive[state.selectedDate] ? `
+          <iframe class="w-full rounded-lg aspect-video mb-3" src="https://www.youtube.com/embed/${state.songArchive[state.selectedDate].videoId}"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"></iframe>
+        ` : `
+          <div class="w-full aspect-video mb-3 rounded-lg bg-slate-800 flex flex-col items-center justify-center text-slate-500 text-xs gap-1">
+            <i data-lucide="disc-3" class="w-5 h-5"></i> 아직 기록된 노래가 없어요
+          </div>
+        `}
+        <input id="manual-song-input" type="text" placeholder="유튜브 링크 직접 입력"
+          class="w-full bg-slate-800 text-xs p-2 rounded border border-slate-700 mb-2" />
+        <button onclick="saveManualSong()" class="w-full text-xs bg-indigo-600 hover:bg-indigo-500 transition rounded-lg py-2 font-medium">
+          이 날짜에 기록하기
+        </button>
+      </div>
+
+      <!-- 내 재생목록 -->
+      ${loggedIn ? `
+        <div class="bg-white border border-gray-100 rounded-2xl p-4">
+          <div class="flex items-center gap-2 mb-3">
+            <i data-lucide="list-music" class="w-4 h-4 text-indigo-500"></i>
+            <span class="text-xs font-bold text-gray-700">내 유튜브 재생목록</span>
+          </div>
+          <div class="space-y-2 max-h-72 overflow-y-auto">
+            ${playlistListHtml || `<p class="text-xs text-gray-400">불러온 재생목록이 없어요.</p>`}
+          </div>
+          <p class="text-[10px] text-gray-400 mt-2 leading-relaxed">
+            곡 목록을 펼쳐서 클릭하면 선택한 날짜에 기록되고, "Focus용"을 누르면 Focus Mode에서 그 재생목록이 자동재생돼요.
+          </p>
+        </div>
+      ` : ""}
+
+      <!-- Focus Mode -->
+      <button onclick="openFocusMode()" class="flex items-center justify-center gap-2 p-3 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition">
+        <i data-lucide="timer" class="w-4 h-4"></i> Focus Mode 시작
+      </button>
+
+      <!-- 메뉴 -->
+      <nav class="flex flex-col gap-2">
+        <button onclick="setTab('planner')" class="flex items-center gap-3 p-3 rounded-xl transition ${state.activeTab === "planner" ? "bg-indigo-50 text-indigo-600" : "text-gray-600 hover:bg-gray-100"}">
+          <i data-lucide="calendar" class="w-5 h-5"></i> <span class="font-medium">플래너 & 캘린더</span>
+        </button>
+        <button onclick="setTab('archive')" class="flex items-center gap-3 p-3 rounded-xl transition ${state.activeTab === "archive" ? "bg-indigo-50 text-indigo-600" : "text-gray-600 hover:bg-gray-100"}">
+          <i data-lucide="disc-3" class="w-5 h-5"></i> <span class="font-medium">뮤직 아카이브</span>
+        </button>
+      </nav>
+    </aside>
+  `;
+}
+
+function renderMain() {
+  const el = document.getElementById("main");
+  if (state.activeTab === "planner") {
+    const dayCells = Array.from({ length: DAYS_IN_MONTH }, (_, i) => {
+      const day = i + 1;
+      const hasSong = !!state.songArchive[day];
+      const isSelected = state.selectedDate === day;
+      return `
+        <button onclick="selectDate(${day})" class="relative aspect-square rounded-xl flex items-center justify-center text-sm transition
+          ${isSelected ? "bg-indigo-600 text-white shadow-lg shadow-indigo-200" : "hover:bg-indigo-50 text-gray-700"}">
+          ${day}
+          ${hasSong ? `<span class="absolute bottom-1.5 w-1.5 h-1.5 rounded-full ${isSelected ? "bg-white" : "bg-indigo-400"}"></span>` : ""}
+        </button>`;
+    }).join("");
+
+    const ddayHtml = state.ddays.map((d) => {
+      const diff = getDdayCount(d.date);
+      const label = diff === 0 ? "D-DAY" : diff > 0 ? `D-${diff}` : `D+${Math.abs(diff)}`;
+      return `
+        <div class="flex items-center justify-between p-3 rounded-xl bg-gray-50">
+          <div>
+            <p class="text-sm font-medium text-gray-700">${escapeHtml(d.label)}</p>
+            <p class="text-xs text-gray-400">${d.date}</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="text-sm font-bold ${diff <= 3 && diff >= 0 ? "text-rose-500" : "text-indigo-600"}">${label}</span>
+            <button onclick="removeDday(${d.id})" class="text-gray-300 hover:text-rose-400">
+              <i data-lucide="trash-2" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>`;
+    }).join("");
+
+    el.innerHTML = `
+      <main class="flex-1 p-4 md:p-10 overflow-y-auto">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          <div class="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+            <div class="flex justify-between items-center mb-6">
+              <h2 class="text-xl font-bold text-gray-800">${YEAR}년 ${MONTH}월</h2>
+            </div>
+            <div class="grid grid-cols-7 gap-2">
+              ${["일","월","화","수","목","금","토"].map((d) => `<div class="text-center text-xs font-bold text-gray-400 py-2">${d}</div>`).join("")}
+              ${dayCells}
+            </div>
+            <p class="text-xs text-gray-400 mt-4 flex items-center gap-1">
+              <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 inline-block"></span> 노래가 기록된 날짜
+            </p>
+          </div>
+
+          <div class="flex flex-col gap-6">
+            <div class="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+              <h3 class="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <i data-lucide="check-circle-2" class="w-5 h-5 text-indigo-500"></i> ${state.selectedDate}일 상세 계획
+              </h3>
+              <div class="space-y-4">
+                ${[
+                  { time: "09:00", task: "아침 명상 및 노래 듣기", done: true },
+                  { time: "13:00", task: "개인 프로젝트 코딩", done: false },
+                  { time: "19:00", task: "작곡 연습 및 녹음", done: false },
+                ].map((item) => `
+                  <div class="flex items-center gap-4 p-3 border-b border-gray-50 last:border-0">
+                    <span class="text-xs font-mono text-gray-400">${item.time}</span>
+                    <span class="flex-1 text-sm ${item.done ? "line-through text-gray-300" : "text-gray-700"}">${item.task}</span>
+                    <input type="checkbox" ${item.done ? "checked" : ""} disabled class="rounded-full text-indigo-600" />
+                  </div>
+                `).join("")}
+                <button class="w-full py-2 border-2 border-dashed border-gray-200 rounded-xl text-gray-400 text-sm flex items-center justify-center gap-2 hover:bg-gray-50">
+                  <i data-lucide="plus" class="w-4 h-4"></i> 할 일 추가
+                </button>
+              </div>
+            </div>
+
+            <div class="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+              <h3 class="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <i data-lucide="target" class="w-5 h-5 text-rose-500"></i> D-Day
+              </h3>
+              <div class="space-y-3 mb-4">${ddayHtml || `<p class="text-sm text-gray-400">등록된 디데이가 없어요.</p>`}</div>
+              <div class="flex gap-2">
+                <input id="dday-label" type="text" placeholder="이름 (예: 콘서트)" class="flex-1 text-sm p-2 rounded-lg border border-gray-200" />
+                <input id="dday-date" type="date" class="text-sm p-2 rounded-lg border border-gray-200" />
+                <button onclick="addDday()" class="px-3 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 transition">
+                  <i data-lucide="plus" class="w-4 h-4"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>`;
+  } else {
+    const days = Object.keys(state.songArchive).map(Number).sort((a, b) => a - b);
+    el.innerHTML = `
+      <main class="flex-1 p-4 md:p-10 overflow-y-auto">
+        <div class="mb-8">
+          <h2 class="text-2xl font-bold text-gray-800">Music Archive</h2>
+          <p class="text-gray-500">날짜별로 기록된 오늘의 노래 &mdash; 나중에 나만의 연말 결산으로</p>
+        </div>
+        ${days.length === 0 ? `
+          <div class="h-40 border-2 border-dashed border-gray-300 rounded-2xl flex flex-col items-center justify-center text-gray-400">
+            <i data-lucide="disc-3" class="w-7 h-7"></i>
+            <span class="text-xs mt-2">아직 기록된 노래가 없어요</span>
+          </div>` : `
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            ${days.map((day) => { const s = state.songArchive[day]; return `
+              <button onclick="selectDate(${day}); setTab('planner')" class="text-left rounded-2xl overflow-hidden border border-gray-100 bg-white shadow-sm hover:shadow-lg transition group">
+                <div class="relative">
+                  <img src="https://img.youtube.com/vi/${s.videoId}/mqdefault.jpg" class="w-full aspect-video object-cover" />
+                  <div class="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition flex items-center justify-center">
+                    <i data-lucide="play" class="w-7 h-7 text-white opacity-0 group-hover:opacity-100 transition"></i>
+                  </div>
+                </div>
+                <div class="p-3">
+                  <p class="text-sm font-bold text-gray-800">${MONTH}월 ${day}일</p>
+                  <p class="text-xs text-gray-400">${escapeHtml(s.recordedAt)}</p>
+                </div>
+              </button>`; }).join("")}
+          </div>`}
+      </main>`;
+  }
+}
+
+renderApp();
+</script>
+</body>
+</html>
