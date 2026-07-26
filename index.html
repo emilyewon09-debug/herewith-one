@@ -12,26 +12,50 @@
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 3px; }
 
+  /* 종이가 구겨지며 날아가는 애니메이션 수정 */
   .crumple-paper {
     position: fixed;
     z-index: 60;
-    background: linear-gradient(135deg, #fffdf7, #f4ecd8);
+    background: linear-gradient(135deg, #fffdf7, #e8dcc4);
     padding: 12px;
     font-size: 11px;
     line-height: 1.4;
     color: #7a6a4d;
     overflow: hidden;
-    box-shadow: 0 6px 16px rgba(0,0,0,0.15);
+    box-shadow: 
+      inset 0 0 15px rgba(0, 0, 0, 0.15), 
+      0 6px 16px rgba(0, 0, 0, 0.15);
     pointer-events: none;
-    clip-path: polygon(8% 6%, 45% 0%, 78% 4%, 100% 20%, 90% 38%, 100% 55%, 82% 68%, 100% 85%, 70% 100%, 45% 92%, 20% 100%, 5% 80%, 15% 58%, 0% 40%, 12% 20%);
-    animation: crumple-toss 0.75s cubic-bezier(.5,-0.2,.7,1) forwards;
+    transform-origin: center center;
+    animation: crumple-toss 1s ease-in-out forwards;
   }
+
   @keyframes crumple-toss {
-    0%   { transform: translate(0,0) scale(1) rotate(0deg); opacity: 1; }
-    25%  { transform: translate(calc(var(--tx) * 0.15), calc(var(--ty) * 0.1)) scale(0.8) rotate(-20deg); }
-    60%  { transform: translate(calc(var(--tx) * 0.6), calc(var(--ty) * 0.5)) scale(0.4) rotate(280deg); opacity: 1; }
-    100% { transform: translate(var(--tx), var(--ty)) scale(0.08) rotate(620deg); opacity: 0; }
+    0% {
+      transform: scale(1) rotate(0deg);
+      border-radius: 0px;
+      opacity: 1;
+    }
+    30% {
+      transform: scale(0.6) rotate(15deg);
+      border-radius: 20% 30% 25% 40%;
+      box-shadow: 
+        inset 10px 10px 20px rgba(0, 0, 0, 0.3),
+        inset -10px -10px 20px rgba(0, 0, 0, 0.2);
+      opacity: 1;
+    }
+    60% {
+      transform: translate(calc(var(--tx) * 0.3), calc(var(--ty) * 0.3)) scale(0.3) rotate(90deg);
+      border-radius: 40% 50% 45% 55%;
+      box-shadow: inset 15px 15px 25px rgba(0, 0, 0, 0.4);
+      opacity: 1;
+    }
+    100% {
+      transform: translate(var(--tx), var(--ty)) scale(0) rotate(360deg);
+      opacity: 0;
+    }
   }
+
   @keyframes trash-shake {
     0%, 100% { transform: rotate(0deg); }
     20% { transform: rotate(-10deg); }
@@ -41,9 +65,6 @@
   }
   .trash-shake { animation: trash-shake 0.45s ease; }
 
-  /* 종이가 손대는 만큼 실제로 접히는 것처럼 보이도록 하는 효과.
-     clip-path로 테두리를 접힌 모양처럼 각지게 만들고,
-     fold-line 레이어들로 접힌 자리마다 생기는 그림자/하이라이트 주름을 겹겹이 쌓는다. */
   .paper-wrap {
     position: relative;
     border-radius: 14px;
@@ -113,14 +134,11 @@
 </head>
 <body class="bg-slate-50">
 
-<!-- ============ 설정: 여기에 본인의 Google OAuth Client ID를 넣으세요 ============ -->
 <script>
   const CONFIG = {
-    // Google Cloud Console에서 발급받은 OAuth 2.0 클라이언트 ID (웹 애플리케이션)
-    CLIENT_ID: "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    CLIENT_ID: "Y896977375631-gi4vc4qmhat4durcfjeurmes40847qr2.apps.googleusercontent.com",
   };
 </script>
-<!-- ================================================================= -->
 
 <div id="header"></div>
 <div class="flex flex-col md:flex-row min-h-screen">
@@ -130,9 +148,6 @@
 <div id="focus-overlay" class="hidden fixed inset-0 bg-black/95 z-50 flex-col items-center justify-center text-white p-6"></div>
 
 <script>
-/* =========================================================
-   상태 (State)
-   ========================================================= */
 const TODAY_YEAR = 2026, TODAY_MONTH = 7, TODAY_DAY = 26;
 function dateKey(y, m, d) { return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`; }
 function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
@@ -141,14 +156,14 @@ const TODAY_KEY = dateKey(TODAY_YEAR, TODAY_MONTH, TODAY_DAY);
 
 let state = {
   accessToken: null,
-  channel: null,               // { title, thumbnail }
-  playlists: [],                // [{ id, title, thumbnail, itemCount }]
-  playlistItems: {},            // playlistId -> [{ videoId, title, thumbnail }]
-  openPlaylistId: null,         // 항목을 펼쳐서 보고 있는 재생목록
-  focusPlaylistId: null,        // Focus Mode에서 재생할 재생목록
-  viewYear: TODAY_YEAR,         // 캘린더에서 현재 보고 있는 연도
-  viewMonth: TODAY_MONTH,       // 캘린더에서 현재 보고 있는 월
-  selectedDate: TODAY_KEY,      // "YYYY-MM-DD" 형식
+  channel: null,
+  playlists: [],
+  playlistItems: {},
+  openPlaylistId: null,
+  focusPlaylistId: null,
+  viewYear: TODAY_YEAR,
+  viewMonth: TODAY_MONTH,
+  selectedDate: TODAY_KEY,
   songArchive: {
     [TODAY_KEY]: { videoId: "dQw4w9WgXcQ", title: "오늘 기록된 노래", recordedAt: "오늘 기록됨" },
   },
@@ -156,16 +171,13 @@ let state = {
     { id: 1, label: "단독 콘서트", date: "2026-09-12" },
     { id: 2, label: "2학기 중간고사", date: "2026-10-20" },
   ],
-  activeTab: "planner",         // planner | archive | trash
-  trashCount: 0,                 // 감정 쓰레기통에 버린 생각 개수
+  activeTab: "planner",
+  trashCount: 0,
 };
 
 let tokenClient = null;
 let timer = { durationMin: 25, secondsLeft: 25 * 60, running: false, intervalId: null };
 
-/* =========================================================
-   Google 로그인 (OAuth 2.0 / Google Identity Services)
-   ========================================================= */
 function initGoogleAuth() {
   if (!window.google || CONFIG.CLIENT_ID.startsWith("YOUR_")) return;
   tokenClient = google.accounts.oauth2.initTokenClient({
@@ -199,9 +211,6 @@ function logout() {
   renderApp();
 }
 
-/* =========================================================
-   YouTube Data API v3 호출
-   ========================================================= */
 async function ytFetch(path) {
   const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}`, {
     headers: { Authorization: `Bearer ${state.accessToken}` },
@@ -259,9 +268,6 @@ async function fetchPlaylistItems(playlistId) {
   }
 }
 
-/* =========================================================
-   유틸
-   ========================================================= */
 function extractVideoId(input) {
   if (!input) return null;
   const t = input.trim();
@@ -285,9 +291,6 @@ function escapeHtml(str = "") {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/* =========================================================
-   액션 (버튼 핸들러)
-   ========================================================= */
 function selectDate(day) { state.selectedDate = dateKey(state.viewYear, state.viewMonth, day); renderApp(); }
 function selectDateFromKey(key) {
   const [y, m] = key.split("-").map(Number);
@@ -362,25 +365,6 @@ function removeDday(id) {
   renderApp();
 }
 
-/* =========================================================
-   Focus Mode / 뽀모도로
-   -----------------------------------------------------------
-   예전 코드는 재생/일시정지, 시간 선택, 재생목록 선택을 누를 때마다
-   focus-overlay의 innerHTML을 통째로 다시 그렸고, 그때마다 <iframe>이
-   완전히 새로 생성됐어요. 브라우저(특히 크롬/사파리)는 이렇게
-   "새로 삽입된" 외부(cross-origin) iframe에 대해서는, 그 순간이
-   진짜 클릭과 동기적으로 연결되어 있지 않으면 소리가 나오는 자동재생을
-   막아버립니다. 그래서 로그인도 되어 있고 영상 주소도 맞는데 소리/재생이
-   안 되는 문제가 있었어요.
-
-   지금은 YouTube IFrame Player API로 플레이어를 "한 번만" 만들고,
-   시작/일시정지/구간 변경 버튼을 누를 때 그 플레이어 인스턴스의
-   playVideo()/pauseVideo()를 직접 호출합니다. 버튼 클릭이 곧바로
-   재생 요청으로 이어지기 때문에 오디오 자동재생 제한을 피할 수 있어요.
-   (단, 재생목록이 "비공개(Private)"로 설정되어 있으면 유튜브 자체 정책상
-   어떤 방식으로도 임베드 재생이 불가능해요 — 이 경우 재생목록을
-   "공개" 또는 "일부 공개"로 바꿔주셔야 해요.)
-   ========================================================= */
 let ytPlayer = null;
 let ytApiReady = false;
 let ytPendingSource = null;
@@ -568,9 +552,6 @@ function renderFocusOverlay() {
   if (window.lucide) lucide.createIcons();
 }
 
-/* =========================================================
-   렌더링
-   ========================================================= */
 function renderApp() {
   renderHeader();
   renderSidebar();
@@ -622,7 +603,6 @@ function renderSidebar() {
         <p class="text-sm text-gray-500">음악과 일상의 기록</p>
       </div>
 
-      <!-- 구글 로그인 -->
       <div class="bg-white border border-gray-100 rounded-2xl p-4">
         ${loggedIn ? `
           <div class="flex items-center gap-3 mb-3">
@@ -641,7 +621,6 @@ function renderSidebar() {
         `}
       </div>
 
-      <!-- 오늘의 노래 -->
       <div class="bg-slate-900 rounded-2xl p-4 text-white">
         <div class="flex items-center gap-2 mb-3">
           <i data-lucide="music" class="w-4 h-4 text-indigo-400"></i>
@@ -662,7 +641,6 @@ function renderSidebar() {
         </button>
       </div>
 
-      <!-- 내 재생목록 -->
       ${loggedIn ? `
         <div class="bg-white border border-gray-100 rounded-2xl p-4">
           <div class="flex items-center gap-2 mb-3">
@@ -678,12 +656,10 @@ function renderSidebar() {
         </div>
       ` : ""}
 
-      <!-- Focus Mode -->
       <button onclick="openFocusMode()" class="flex items-center justify-center gap-2 p-3 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition">
         <i data-lucide="timer" class="w-4 h-4"></i> Focus Mode 시작
       </button>
 
-      <!-- 메뉴 -->
       <nav class="flex flex-col gap-2">
         <button onclick="setTab('planner')" class="flex items-center gap-3 p-3 rounded-xl transition ${state.activeTab === "planner" ? "bg-indigo-50 text-indigo-600" : "text-gray-600 hover:bg-gray-100"}">
           <i data-lucide="calendar" class="w-5 h-5"></i> <span class="font-medium">플래너 & 캘린더</span>
@@ -875,9 +851,6 @@ function renderMain() {
   }
 }
 
-/* =========================================================
-   감정 쓰레기통 (Emotion Trash Bin)
-   ========================================================= */
 let paperTapCount = 0;
 
 function tapPaper() {
@@ -942,7 +915,7 @@ function throwCrumpledPaper() {
 
   if (binEl) {
     binEl.classList.remove("trash-shake");
-    void binEl.offsetWidth; // reflow to restart animation
+    void binEl.offsetWidth;
     binEl.classList.add("trash-shake");
     setTimeout(() => binEl.classList.remove("trash-shake"), 450);
   }
@@ -957,7 +930,6 @@ function throwCrumpledPaper() {
   const countLabel = document.getElementById("trash-count-label");
   if (countLabel) countLabel.textContent = `오늘 ${state.trashCount}개의 생각을 버렸어요`;
 }
-
 
 renderApp();
 </script>
